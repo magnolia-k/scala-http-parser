@@ -6,44 +6,62 @@ import scala.collection._
 import java.net.URLDecoder._
 
 object HttpParser {
-  def parseHttpRequest(blob: String): Either[String, Map[String, String]] = {
+  def parseHttpRequest(blob: String): Either[String, Map[String, String]] =
     HTTPRequestHeaderParser(blob)
-  }
 }
 
 object HTTPRequestHeaderParser extends RegexParsers {
   override val skipWhitespace = false
-  val env = mutable.Map[String, String]()
   
-  def header = rep(CRLF) ~ requestLine ~ CRLF ~ rep(headerField ~ CRLF) ~ rep(headerField ~ CRLF) ~ CRLF ~ """.*""".r
+  def httpHeader = rep(CRLF) ~> requestLine ~ CRLF ~ headers <~ CRLF <~ """.*""".r ^^ {
+    case (r ~ _ ~ h ) => Map("SCRIPT_NAME" -> "") ++ r ++ h
+  }
+  def requestLine = method ~ SP ~ requestTarget ~ SP ~ HTTPVersion ^^ {
+    case (m ~ _ ~ r ~ _ ~ h) => m ++ r ++ h
+  }
+  def method = token ^^ { x => Map("REQUEST_METHOD" -> x) }
 
-  def requestLine = method ~ SP ~ requestTarget ~ SP ~ HTTPVersion
-  def method = token ^^ { method => env += "REQUEST_METHOD" -> method.toString }
-  def requestTarget = path ~ opt("?" ~ query) ^^ { request =>
-    env += "REQUEST_URI" -> request._1.toString
-    request._2 match {
-      case Some(q) => env += "QUERY_STRING" -> q.toString
-      case None    => env += "QUERY_STRING" -> ""
+  def requestTarget = path ~ opt("?" ~> query) ^^ {
+    case (p ~ q) => {
+      val m = Map.newBuilder[String, String]
+      m += "PATH_INFO" -> decode( p, "UTF-8" )
+
+      q match {
+        case Some(x) => {
+          m += "REQUEST_URI" -> { p + "?" + x("QUERY_STRING") } 
+          m += "QUERY_STRING" -> x("QUERY_STRING")
+        }
+        case None    => {
+          m += "REQUEST_URI" -> p
+          m += "QUERY_STRING" -> ""
+        }
+      }
+
+      m.result
     }
   }
-  def path = """[^?#\ ]+""".r ^^ { r => env += "PATH_INFO" -> decode(r.toString, "UTF-8") }
-  def query = """[^#\ ]+""".r
+
+  def path = """[^?#\ ]+""".r
+  def query = """[^#\ ]+""".r ^^ { x => Map("QUERY_STRING" -> x ) }
   def token = """[!#$%&'*+-.^_`|~0-9A-Za-z]+""".r
   def CRLF = opt(CR) ~ LF
 
-  def HTTPVersion = """HTTP/1\.[01]""".r ^^ { httpversion => env += "SERVER_PROTOCOL" -> httpversion.toString }
-
-  def headerField = fieldName ~ ":" ~ ows ~ fieldValue ~ ows ^^ { result => 
-    val name = { 
-      val f = result._1.toString.replaceAll("-", "_").toUpperCase
-      if (f != "CONTENT_LENGTH" || f != "CONTENT_TYPE") "HTTP_" + f else f
-    }
-
-    env += name -> result._2.mkString(" ")
+  def HTTPVersion = """HTTP/1\.[01]""".r ^^ { x => Map( "SERVER_PROTOCOL" -> x ) }
+  def headers     = rep(headerField <~ CRLF) ^^ { x =>
+    x.foldLeft(Map[String, String]()) { (x, acc) => x ++ acc }
   }
+  def headerField = fieldName ~ ":" ~ ows ~ fieldValue <~ ows ^^ {
+    case (n ~ ":" ~ o ~ v) => {
+      val fn = n.toString.replaceAll("-", "_").toUpperCase
+      val name = if (fn != "CONTENT_LENGTH" && fn != "CONTENT_TYPE") "HTTP_" + fn else fn
+
+      Map( name -> v.mkString(" ") )
+    }
+  }
+
   def fieldName = token
-  def fieldValue = fieldContent ~ rep(obsFold ~> fieldContent) ^^ { result =>
-    List(result._1) ++ result._2
+  def fieldValue = fieldContent ~ rep(obsFold ~> fieldContent) ^^ {
+    case (fc ~ fcs) => List(fc) ++ fcs
   }
 
   def fieldContent = """.*""".r
@@ -56,9 +74,11 @@ object HTTPRequestHeaderParser extends RegexParsers {
   def LF = "\u000a"
   def SP = "\u0020"
 
-  def apply(requestHeader: String): Either[String, Map[String, String]] = parseAll(header, requestHeader) match {
-    case Success(parsedHeader, next)    => Right(env.toMap)
-    case NoSuccess(errorMessage, next)  =>
-      Left(s"$errorMessage on line ${next.pos.line} on column ${next.pos.column}")
+  def apply(requestHeader: String): Either[String, Map[String, String]] = {
+    parseAll(httpHeader, requestHeader) match {
+      case Success(parsedHeader, next)    => Right(parsedHeader)
+      case NoSuccess(errorMessage, next)  =>
+        Left(s"$errorMessage on line ${next.pos.line} on column ${next.pos.column}")
+    }
   }
 }
