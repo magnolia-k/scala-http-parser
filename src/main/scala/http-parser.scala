@@ -5,9 +5,34 @@ import scala.collection._
 
 import java.net.URLDecoder._
 
+// Some -> 解析完了
+// None -> まだ完了していない
+// Throw Exception -> 誤ったヘッダ
+
+case class HttpParsingException(e: String) extends Throwable
+
 object HttpParser {
-  def parseHttpRequest(blob: String): Either[String, Map[String, String]] =
-    HTTPRequestHeaderParser(blob)
+  def parseHttpRequest(blob: String): Option[(Int, Map[String, String])] = {
+    val env = HTTPRequestHeaderParser(blob)
+
+    env match {
+      case Right(e) => {
+        val m = """(?s)^(?:\u000d\u000a|\u000a)?.*(?:\u000d\u000a|\u000a){2}""".r.findFirstIn(blob)
+        val l = m.get.length
+
+        Some( (l, e) )
+      }
+      case Left(_)  => {
+        // pre-header blank lines are allowed (RFC 2616 4.1)
+        val h = blob.replaceAll("^(?:\u000d\u000a|\u000a)+", "")
+
+        if ( """(?:\u000d\u000a|\u000a)(?:\u000d\u000a|\u000a)""".r.findFirstIn(h).nonEmpty )
+          throw new HttpParsingException("Invalid HTTP header") // invalid header
+        else
+          None                                                  // request incomplete
+      }
+    }
+  }
 }
 
 object HTTPRequestHeaderParser extends RegexParsers {
@@ -22,20 +47,21 @@ object HTTPRequestHeaderParser extends RegexParsers {
   def method = token ^^ { x => Map("REQUEST_METHOD" -> x) }
 
   def requestTarget = path ~ opt("?" ~> query) ^^ {
-    case (p ~ q) => {
+
+    case (p ~ Some(q)) => {
       val m = Map.newBuilder[String, String]
       m += "PATH_INFO" -> decode( p, "UTF-8" )
+      m += "REQUEST_URI" -> { p + "?" + q("QUERY_STRING") } 
+      m += "QUERY_STRING" -> q("QUERY_STRING")
 
-      q match {
-        case Some(x) => {
-          m += "REQUEST_URI" -> { p + "?" + x("QUERY_STRING") } 
-          m += "QUERY_STRING" -> x("QUERY_STRING")
-        }
-        case None    => {
-          m += "REQUEST_URI" -> p
-          m += "QUERY_STRING" -> ""
-        }
-      }
+      m.result
+    }
+
+    case (p ~ None) => {
+      val m = Map.newBuilder[String, String]
+      m += "PATH_INFO" -> decode( p, "UTF-8" )
+      m += "REQUEST_URI" -> p
+      m += "QUERY_STRING" -> ""
 
       m.result
     }
